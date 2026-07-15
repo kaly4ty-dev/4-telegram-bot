@@ -5,7 +5,7 @@ import ccxt
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-app = Flask(name)
+app = Flask(__name__)
 
 @app.route('/')
 def home():
