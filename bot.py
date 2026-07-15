@@ -17,22 +17,20 @@ MEXC_KEY = os.getenv("MEXC_API_KEY")
 MEXC_SECRET = os.getenv("MEXC_SECRET")
 print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
 print(f"MEXC_KEY exists: {bool(MEXC_KEY)}")
-# Setup MEXCexchange = ccxt.mexc({
+# Setup MEXC
+exchange = ccxt.mexc({
 'apiKey': MEXC_KEY,
-'secret': MEXC_SECRET,
-'enableRateLimit': True
-})
+{'secret': MEXC_SECRET,
+'enableRateLimit': True})
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text(
-"✅ *Trading Bot Ready!*\n\n"
+        "✅ Trading Bot Ready!\n\n"
         "Commands:\n"
         "/balance - Check your MEXC USDT balance\n"
         "/price - Check BTC & SOL prices\n"
         "/status - Bot status\n"
         "/help - Help",
-        parse_mode='Markdown'
-    )
-
+        parse_mode='Markdown')
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         bal = exchange.fetch_balance()
@@ -55,11 +53,9 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sol_ticker = exchange.fetch_ticker('SOL/USDT')
         await update.message.reply_text(f"📈 *Prices:*\nBTC: ${btc_ticker['last']:.2f}\nSOL: ${sol_ticker['last']:.2f}", parse_mode='Markdown')
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
+        await update.message.reply_text(f"❌ Error: {e}"
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🟢 Bot is running on your laptop!\nMode: LIVE with MEXC\nTP: 5% | SL: 1.5%")
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("/balance - check money\n/price - check prices\n/start - restart")
 
