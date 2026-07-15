@@ -18,7 +18,7 @@ MEXC_SECRET = os.getenv("MEXC_SECRET")
 print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
 print(f"MEXC_KEY exists: {bool(MEXC_KEY)}")
 # Setup MEXC
-exchange = ccxt.mexc({
+exchange = ccxt.mexc( {
 'apiKey': MEXC_KEY,
 {'secret': MEXC_SECRET,
 'enableRateLimit': True})
