@@ -1,34 +1,30 @@
+
 from flask import Flask
 import threading
-app = Flask(--name--)
-@app.route('/')
-def home():
-return "Bot is LIVE!"
-def run_web():
-app.run(host="0.0.0.0", port=10000)
-threading.Thread(target=run_web).start()
 import os
 import ccxt
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+app = Flask(name)
+@app.route('/')
+def home():
+return "Bot is LIVE!"
+def run_web():
+app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+from telegram.ext import Application, CommandHandler, ContextTypes
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MEXC_KEY = os.getenv("MEXC_API_KEY")
 MEXC_SECRET = os.getenv("MEXC_SECRET")
-
 print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
 print(f"MEXC_KEY exists: {bool(MEXC_KEY)}")
-
-# Setup MEXC
-exchange = ccxt.mexc({
-    'apiKey': MEXC_KEY,
-    'secret': MEXC_SECRET,
-    'enableRateLimit': True
+# Setup MEXCexchange = ccxt.mexc({
+'apiKey': MEXC_KEY,
+'secret': MEXC_SECRET,
+'enableRateLimit': True
 })
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ *Trading Bot Ready!*\n\n"
+await update.message.reply_text(
+"✅ *Trading Bot Ready!*\n\n"
         "Commands:\n"
         "/balance - Check your MEXC USDT balance\n"
         "/price - Check BTC & SOL prices\n"
