@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 app = Flask(name)
 @app.route('/')
 def home():
-return "Bot is LIVE!"
+    return "Bot is LIVE!"
 def run_web():
 app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 from telegram.ext import Application, CommandHandler, ContextTypes
