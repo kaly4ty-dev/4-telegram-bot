@@ -45,12 +45,17 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        balance = exchange.fetch_balance()
-        usdt = balance.get('USDT', {}).get('free', 0) if balance else 0
-        bal_text = f"USDT: ${usdt:.2f}"
+        bal = exchange.fetch_balance()
+        free = 0
+        if 'USDT' in bal and isinstance(bal['USDT'], dict):
+            free = bal['USDT'].get('free', 0) or 0
+        if free == 0 and 'free' in bal:
+            free = bal['free'].get('USDT', 0) or 0
+        if free == 0 and 'total' in bal:
+            free = bal['total'].get('USDT', 0) or 0
+        await update.message.reply_text(f"🟢 Bot running on Render!\nMode: LIVE MEXC\nTP: {TP}% | SL: {SL}%\nUSDT Free: ${free:.4f}")
     except Exception as e:
-        bal_text = f"USDT: Error - {e}"
-    await update.message.reply_text(f"🟢 Bot running on Render!\nMode: LIVE MEXC\nTP: {TP}% | SL: {SL}%\n{bal_text}")
+        await update.message.reply_text(f"🟢 Bot running! Balance check: {e}")
 
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -59,26 +64,41 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         text = " ".join(context.args).lower().replace('usdt','').strip()
         amount = float(text)
-        await update.message.reply_text(f"⏳ Trying to buy ${amount} of {SYMBOL}...")
-        balance = exchange.fetch_balance()
-        free_usdt = balance['USDT']['free']
+        
+        bal = exchange.fetch_balance()
+        free_usdt = 0
+        if 'USDT' in bal and isinstance(bal['USDT'], dict):
+            free_usdt = bal['USDT'].get('free', 0) or 0
+        if free_usdt == 0 and 'free' in bal:
+            free_usdt = bal['free'].get('USDT', 0) or 0
+            
         if free_usdt < amount:
             await update.message.reply_text(f"❌ Insufficient funds.\nYou have: ${free_usdt:.2f}\nYou tried: ${amount}")
             return
-        # UNCOMMENT TO TRADE REAL MONEY:
+            
+        await update.message.reply_text(f"⏳ Buying ${amount} of {SYMBOL}...")
+        # UNCOMMENT NEXT 2 LINES TO TRADE REAL MONEY:
         # order = exchange.create_market_buy_order(SYMBOL, amount)
         # await update.message.reply_text(f"✅ Bought! Order ID: {order['id']}\nTP: {TP}% | SL: {SL}%")
-        await update.message.reply_text(f"✅ BUY signal OK!\nYou have ${free_usdt:.2f} available.\n[Testing mode - real order commented out line 68. Uncomment to trade live]\nTP: {TP}% SL: {SL}% will apply.")
+        
+        await update.message.reply_text(f"✅ BUY signal OK (Test Mode)!\nYou have ${free_usdt:.2f} available.\nUncomment lines 62-63 to trade live.\nTP: {TP}% SL: {SL}% will apply.")
     except Exception as e:
         await update.message.reply_text(f"❌ Buy failed: {e}")
 
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         bal = exchange.fetch_balance()
-        free = bal['USDT']['free']
+        free = 0
+        if 'USDT' in bal and isinstance(bal['USDT'], dict):
+            free = bal['USDT'].get('free', 0) or 0
+        if free == 0 and 'free' in bal:
+            free = bal['free'].get('USDT', 0) or 0
+        if free == 0 and 'total' in bal:
+            free = bal['total'].get('USDT', 0) or 0
+        
         await update.message.reply_text(f"💰 USDT Free: ${free:.4f}")
     except Exception as e:
-        await update.message.reply_text(f"Balance error: {e}")
+        await update.message.reply_text(f"Balance error: {e}\nRaw keys: {str(e)[:100]}")
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("price", price_cmd))
@@ -86,6 +106,5 @@ app.add_handler(CommandHandler("status", status_cmd))
 app.add_handler(CommandHandler("balance", balance_cmd))
 app.add_handler(CommandHandler("buy", buy_cmd))
 
-print("Bot started...")
-# This drop_pending_updates=True prevents Conflict forever
+print("Bot started with TRADING logic...")
 app.run_polling(drop_pending_updates=True)
