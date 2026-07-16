@@ -60,7 +60,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not context.args:
-            await update.message.reply_text("Usage: /buy 5  or  /buy 5 usdt")
+                    # await update.message.reply_text(f"✅ BUY signal OK (Test Mode)! You have ${balance} available. Uncomment lines 62-63 to trade live.\nTP: {TP}% SL: {SL}% will apply.")
             return
         text = " ".join(context.args).lower().replace('usdt','').strip()
         amount = float(text)
