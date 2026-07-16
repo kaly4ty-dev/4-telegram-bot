@@ -77,7 +77,7 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         await update.message.reply_text(f"⏳ Buying ${amount} of {SYMBOL}...")
-         UNCOMMENT NEXT 2 LINES TO TRADE REAL MONEY:
+        # UNCOMMENT NEXT 2 LINES TO TRADE REAL MONEY:
          order = exchange.create_market_buy_order(SYMBOL, amount)
          await update.message.reply_text(f"✅ Bought! Order ID: {order['id']}\nTP: {TP}% | SL: {SL}%")
         
