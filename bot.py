@@ -77,10 +77,9 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         await update.message.reply_text(f"⏳ Buying ${amount} of {SYMBOL}...")
-        # UNCOMMENT NEXT 2 LINES TO TRADE REAL MONEY:
-          order = exchange.create_market_buy_order(SYMBOL, amount)
-          await update.message.reply_text(f"✅ Bought! Order ID: {order['id']}\nTP: {TP}% | SL: {SL}%")
-        
+                # UNCOMMENT NEXT 2 LINES TO TRADE REAL MONEY:
+        order = exchange.create_market_buy_order(SYMBOL, amount)
+        await update.message.reply_text(f"✅ Bought! Order ID: {order['id']}\nTP: {TP}% | SL: {SL}%")
         await update.message.reply_text(f"✅ BUY signal OK (Test Mode)!\nYou have ${free_usdt:.2f} available.\nUncomment lines 62-63 to trade live.\nTP: {TP}% SL: {SL}% will apply.")
     except Exception as e:
         await update.message.reply_text(f"❌ Buy failed: {e}")
