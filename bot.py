@@ -1,109 +1,115 @@
 import os
-import threading
-from flask import Flask
+import asyncio
 import ccxt
+from flask import Flask
+from threading import Thread
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-MEXC_API_KEY = os.getenv('MEXC_API_KEY')
-MEXC_SECRET = os.getenv('MEXC_SECRET')
-
+# === CONFIG ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MEXC_API_KEY = os.getenv("MEXC_API_KEY")
+MEXC_SECRET = os.getenv("MEXC_SECRET")
+SYMBOL = "BTC/USDT"
 TP = 5.0
 SL = 1.5
-SYMBOL = "BTC/USDT"
 
-print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
-print(f"MEXC_API_KEY exists: {bool(MEXC_API_KEY)}")
-
-# --- FIX FOR RENDER PORT ERROR ---
-flask_app = Flask(__name__)
-@flask_app.route('/')
-def home():
-    return "Bot is running!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_flask, daemon=True).start()
-# --- END FIX ---
-
+# === EXCHANGE ===
 exchange = ccxt.mexc({
     'apiKey': MEXC_API_KEY,
     'secret': MEXC_SECRET,
-    'options': {'defaultType': 'spot'}
+    'enableRateLimit': True,
 })
 
-async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        btc = exchange.fetch_ticker('BTC/USDT')['last']
-        sol = exchange.fetch_ticker('SOL/USDT')['last']
-        await update.message.reply_text(f"📈 BTC: ${btc:,.2f}\nSOL: ${sol:,.2f}")
-    except Exception as e:
-        await update.message.reply_text(f"Price error: {e}")
+# === FLASK FOR RENDER ===
+app = Flask(__name__)
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        bal = exchange.fetch_balance()
-        free = 0
-        if 'USDT' in bal and isinstance(bal['USDT'], dict):
-            free = bal['USDT'].get('free', 0) or 0
-        if free == 0 and 'free' in bal:
-            free = bal['free'].get('USDT', 0) or 0
-        if free == 0 and 'total' in bal:
-            free = bal['total'].get('USDT', 0) or 0
-        await update.message.reply_text(f"🟢 Bot running on Render!\nMode: LIVE MEXC\nTP: {TP}% | SL: {SL}%\nUSDT Free: ${free:.4f}")
-    except Exception as e:
-        await update.message.reply_text(f"🟢 Bot running! Balance check: {e}")
+@app.route('/')
+def home():
+    return "Bot is Live! No Conflict!"
 
-async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not context.args:
-                    # await update.message.reply_text(f"✅ BUY signal OK (Test Mode)! You have ${balance} available. Uncomment lines 62-63 to trade live.\nTP: {TP}% SL: {SL}% will apply.")
-            return
-        text = " ".join(context.args).lower().replace('usdt','').strip()
-        amount = float(text)
-        
-        bal = exchange.fetch_balance()
-        free_usdt = 0
-        if 'USDT' in bal and isinstance(bal['USDT'], dict):
-            free_usdt = bal['USDT'].get('free', 0) or 0
-        if free_usdt == 0 and 'free' in bal:
-            free_usdt = bal['free'].get('USDT', 0) or 0
-            
-        if free_usdt < amount:
-            await update.message.reply_text(f"❌ Insufficient funds.\nYou have: ${free_usdt:.2f}\nYou tried: ${amount}")
-            return
-            
-        await update.message.reply_text(f"⏳ Buying ${amount} of {SYMBOL}...")
-                # UNCOMMENT NEXT 2 LINES TO TRADE REAL MONEY:
-        order = exchange.create_market_buy_order(SYMBOL, amount)
-        await update.message.reply_text(f"✅ Bought! Order ID: {order['id']}\nTP: {TP}% | SL: {SL}%")
-        await update.message.reply_text(f"✅ BUY signal OK (Test Mode)!\nYou have ${free_usdt:.2f} available.\nUncomment lines 62-63 to trade live.\nTP: {TP}% SL: {SL}% will apply.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Buy failed: {e}")
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# === TELEGRAM COMMANDS ===
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 Bot Online! No more Conflict!\n\nCommands:\n/balance - Check USDT\n/price - BTC Price\n/buy 5 usdt - Buy BTC\n/sell - Sell all BTC")
 
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         bal = exchange.fetch_balance()
-        free = 0
-        if 'USDT' in bal and isinstance(bal['USDT'], dict):
-            free = bal['USDT'].get('free', 0) or 0
-        if free == 0 and 'free' in bal:
-            free = bal['free'].get('USDT', 0) or 0
-        if free == 0 and 'total' in bal:
-            free = bal['total'].get('USDT', 0) or 0
-        
-        await update.message.reply_text(f"💰 USDT Free: ${free:.4f}")
+        usdt_free = bal.get('USDT', {}).get('free', 0)
+        btc_free = bal.get('BTC', {}).get('free', 0)
+        await update.message.reply_text(f"💰 Balance:\nUSDT: ${usdt_free:.2f}\nBTC: {btc_free:.8f}")
     except Exception as e:
-        await update.message.reply_text(f"Balance error: {e}\nRaw keys: {str(e)[:100]}")
+        await update.message.reply_text(f"❌ Balance error: {e}")
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("price", price_cmd))
-app.add_handler(CommandHandler("status", status_cmd))
-app.add_handler(CommandHandler("balance", balance_cmd))
-app.add_handler(CommandHandler("buy", buy_cmd))
+async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        ticker = exchange.fetch_ticker(SYMBOL)
+        await update.message.reply_text(f"📈 {SYMBOL}: ${ticker['last']:.2f}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Price error: {e}")
 
-print("Bot started with TRADING logic...")
-app.run_polling(drop_pending_updates=True)
+async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text("Use: /buy 5 usdt")
+            return
+        text = " ".join(context.args).lower().replace("usdt","").strip()
+        usd_amount = float(text)
+        
+        await update.message.reply_text(f"⏳ Buying ${usd_amount} of {SYMBOL}...")
+        
+        # Get price to calculate amount
+        ticker = exchange.fetch_ticker(SYMBOL)
+        price = ticker['last']
+        amount = usd_amount / price
+
+        # REAL BUY
+        order = exchange.create_market_buy_order(SYMBOL, amount)
+        await update.message.reply_text(f"✅ Bought! Order ID:\n{order['id']}\nTP: {TP}% | SL: {SL}%")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Buy failed: {e}")
+
+async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Selling all BTC...")
+        bal = exchange.fetch_balance()
+        btc_free = bal.get('BTC', {}).get('free', 0)
+        if btc_free < 0.000001:
+            await update.message.reply_text("❌ No BTC to sell")
+            return
+        order = exchange.create_market_sell_order(SYMBOL, btc_free)
+        await update.message.reply_text(f"✅ Sold! Order ID: {order['id']}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Sell failed: {e}")
+
+# === MAIN ===
+async def main():
+    # THIS FIXES THE CONFLICT ERROR FOREVER
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("balance", balance_cmd))
+    application.add_handler(CommandHandler("price", price_cmd))
+    application.add_handler(CommandHandler("buy", buy_cmd))
+    application.add_handler(CommandHandler("sell", sell_cmd))
+
+    # Delete any old webhook / pending updates that cause Conflict
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    print("Webhook deleted, starting polling...")
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    
+    print("Bot polling started - No Conflict!")
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    # Start Flask in background thread for Render port
+    Thread(target=run_flask, daemon=True).start()
+    # Start bot
+    asyncio.run(main())
