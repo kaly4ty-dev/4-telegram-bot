@@ -1,190 +1,219 @@
-import os
-import asyncio
+import os, time, threading
 import ccxt
-from flask import Flask
-from threading import Thread
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from flask import Flask
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# === CONFIG ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 MEXC_API_KEY = os.getenv("MEXC_API_KEY")
-MEXC_SECRET = os.getenv("MEXC_SECRET")
-SYMBOL = "BTC/USDT"
-TP_PERCENT = 5.0
-SL_PERCENT = 1.5
+MEXC_API_SECRET = os.getenv("MEXC_API_SECRET")
+
+# === MEME COINS LIST ===
+MEME_COINS = {
+    "PEPE": {"symbol": "PEPE/USDT", "tp": 10.0, "sl": 3.0, "decimals": 8},
+    "DOGE": {"symbol": "DOGE/USDT", "tp": 8.0, "sl": 2.5, "decimals": 6},
+    "SHIB": {"symbol": "SHIB/USDT", "tp": 10.0, "sl": 3.0, "decimals": 8},
+    "BONK": {"symbol": "BONK/USDT", "tp": 15.0, "sl": 4.0, "decimals": 8},
+    "FLOKI": {"symbol": "FLOKI/USDT", "tp": 12.0, "sl": 3.5, "decimals": 6},
+    "WIF": {"symbol": "WIF/USDT", "tp": 12.0, "sl": 3.5, "decimals": 4},
+    "BTC": {"symbol": "BTC/USDT", "tp": 5.0, "sl": 1.5, "decimals": 6},
+}
+
+active_trades = {}
 
 exchange = ccxt.mexc({
     'apiKey': MEXC_API_KEY,
-    'secret': MEXC_SECRET,
+    'secret': MEXC_API_SECRET,
     'enableRateLimit': True,
+    'options': {'defaultType': 'spot'}
 })
 
-# Store trade info
-trade_info = {
-    "entry_price": None,
-    "btc_amount": 0,
-    "active": False
-}
-
-app = Flask(__name__)
-@app.route('/')
+app_flask = Flask(__name__)
+@app_flask.route('/')
 def home():
-    return f"Bot Live! Auto TP {TP_PERCENT}% / SL {SL_PERCENT}%"
+    return "MEME COIN BOT IS LIVE! 🐸🐶🚀"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = f"Active: {trade_info['active']}\nEntry: ${trade_info['entry_price']}" if trade_info['active'] else "No active trade"
-    await update.message.reply_text(f"🚀 Auto TP/SL Bot Live!\n\nTP: +{TP_PERCENT}%\nSL: -{SL_PERCENT}%\n\n{status}\n\nCommands:\n/balance\n/price\n/buy 5 usdt\n/sell\n/status")
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not trade_info['active']:
-        await update.message.reply_text("💤 No active trade. Use /buy 5 usdt")
-        return
+def get_price(symbol):
     try:
-        ticker = exchange.fetch_ticker(SYMBOL)
-        curr = ticker['last']
-        entry = trade_info['entry_price']
-        pnl = (curr - entry) / entry * 100
-        await update.message.reply_text(f"📊 Active Trade:\nEntry: ${entry:.2f}\nNow: ${curr:.2f}\nPnL: {pnl:+.2f}%\nAmount: {trade_info['btc_amount']:.8f} BTC\n\nTP: +{TP_PERCENT}% | SL: -{SL_PERCENT}%")
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        return exchange.fetch_ticker(symbol)['last']
+    except:
+        return None
+
+# === TELEGRAM COMMANDS ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = """🔥 *MEME COIN BOT V2* 🔥
+
+*Available Coins:*
+🐸 PEPE - /buy 5 pepe
+🐕 DOGE - /buy 5 doge
+🐶 SHIB - /buy 5 shib
+🐾 BONK - /buy 5 bonk
+🔥 FLOKI - /buy 5 floki
+🎩 WIF - /buy 5 wif
+₿ BTC - /buy 5 btc
+
+*Commands:*
+/balance - check wallet
+/status - check PnL
+/sell pepe - sell pepe
+/sell all - sell everything
+
+*Auto TP/SL:*
+Meme: +10-15% TP, -3-4% SL
+BTC: +5% TP, -1.5% SL
+
+Bot auto-sells when TP/SL hits!
+"""
+    await update.message.reply_text(txt, parse_mode='Markdown')
 
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         bal = exchange.fetch_balance()
-        usdt = bal.get('USDT', {}).get('free', 0)
-        btc = bal.get('BTC', {}).get('free', 0)
-        await update.message.reply_text(f"💰 Balance:\nUSDT: ${usdt:.2f}\nBTC: {btc:.8f}")
+        usdt = bal['USDT']['free']
+        msg = f"💰 *Balance*\nUSDT: ${usdt:.4f}\n\n"
+        for coin, info in MEME_COINS.items():
+            base = info['symbol'].split('/')[0]
+            free = bal.get(base, {}).get('free', 0)
+            if free > 0:
+                price = get_price(info['symbol'])
+                value = free * price if price else 0
+                msg += f"{coin}: {free} (~${value:.2f})\n"
+        await update.message.reply_text(msg, parse_mode='Markdown')
     except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
+        await update.message.reply_text(f"Error: {e}")
 
-async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        ticker = exchange.fetch_ticker(SYMBOL)
-        await update.message.reply_text(f"📈 {SYMBOL}: ${ticker['last']:.2f}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not active_trades:
+        await update.message.reply_text("📭 No active trades")
+        return
+    msg = "📊 *ACTIVE TRADES*\n\n"
+    for sym, t in active_trades.items():
+        now = get_price(sym)
+        if now:
+            pnl = (now - t['entry']) / t['entry'] * 100
+            coin = t['coin']
+            msg += f"*{coin}* {sym}\nEntry: {t['entry']}\nNow: {now}\nPnL: {pnl:.2f}%\nTP:+{t['tp']}% SL:-{t['sl']}%\nAmount: {t['amount']}\n\n"
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if not context.args:
-            await update.message.reply_text("Use: /buy 5 usdt  or  /buy 23 usdt")
+        if len(context.args) < 2:
+            await update.message.reply_text("Use: /buy 5 pepe")
             return
-        text = " ".join(context.args).lower().replace("usdt","").strip()
-        usd_amount = float(text)
-        await update.message.reply_text(f"⏳ Buying ${usd_amount} of {SYMBOL}...")
-
-        ticker = exchange.fetch_ticker(SYMBOL)
-        price = ticker['last']
-        amount = usd_amount / price
-        # Round amount to avoid precision error
-        amount = float(exchange.amount_to_precision(SYMBOL, amount))
-
-        order = exchange.create_market_buy_order(SYMBOL, amount)
+        usdt_amount = float(context.args[0])
+        coin_name = context.args[1].upper()
         
-        # Save trade
-        trade_info["entry_price"] = price
-        trade_info["btc_amount"] = amount
-        trade_info["active"] = True
-
-        await update.message.reply_text(f"✅ Bought {amount:.8f} BTC @ ${price:.2f}\nOrder: {order['id']}\n\n🤖 Auto Sell Armed:\nTP: +{TP_PERCENT}% = ${price*(1+TP_PERCENT/100):.2f}\nSL: -{SL_PERCENT}% = ${price*(1-SL_PERCENT/100):.2f}")
+        if coin_name not in MEME_COINS:
+            await update.message.reply_text(f"Coin {coin_name} not supported. Use: {', '.join(MEME_COINS.keys())}")
+            return
+        
+        info = MEME_COINS[coin_name]
+        symbol = info['symbol']
+        
+        price = get_price(symbol)
+        if not price:
+            await update.message.reply_text("Can't get price")
+            return
+        
+        qty = usdt_amount / price
+        
+        # MEXC needs proper precision for meme coins
+        try:
+            # Try market buy with quote amount (better for meme)
+            order = exchange.create_market_buy_order(symbol, qty)
+        except Exception as e:
+            # Fallback: buy with cost
+            order = exchange.create_order(symbol, 'market', 'buy', qty, None, {'quoteOrderQty': usdt_amount})
+        
+        active_trades[symbol] = {
+            'entry': price,
+            'amount': qty,
+            'tp': info['tp'],
+            'sl': info['sl'],
+            'coin': coin_name
+        }
+        
+        await update.message.reply_text(
+            f"✅ *BOUGHT {coin_name}*\n"
+            f"Qty: {qty}\nPrice: {price}\nCost: ${usdt_amount}\n\n"
+            f"🤖 Auto: TP +{info['tp']}% (${price*(1+info['tp']/100)})\n"
+            f"SL -{info['sl']}% (${price*(1-info['sl']/100)})",
+            parse_mode='Markdown'
+        )
     except Exception as e:
         await update.message.reply_text(f"❌ Buy failed: {e}")
 
 async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        bal = exchange.fetch_balance()
-        btc_free = bal.get('BTC', {}).get('free', 0)
-        if btc_free < 0.000001:
-            await update.message.reply_text("❌ No BTC to sell")
-            trade_info["active"] = False
+        if not context.args:
+            await update.message.reply_text("Use: /sell pepe or /sell all")
             return
-        btc_free = float(exchange.amount_to_precision(SYMBOL, btc_free))
-        await update.message.reply_text(f"⏳ Selling {btc_free:.8f} BTC...")
-        order = exchange.create_market_sell_order(SYMBOL, btc_free)
-        trade_info["active"] = False
-        trade_info["entry_price"] = None
-        trade_info["btc_amount"] = 0
-        await update.message.reply_text(f"✅ Sold! Order: {order['id']}\nAuto TP/SL disarmed.")
+        target = context.args[0].upper()
+        bal = exchange.fetch_balance()
+        
+        if target == "ALL":
+            for coin, info in MEME_COINS.items():
+                base = info['symbol'].split('/')[0]
+                free = bal.get(base, {}).get('free', 0)
+                if free > 0:
+                    exchange.create_market_sell_order(info['symbol'], free)
+                    if info['symbol'] in active_trades:
+                        del active_trades[info['symbol']]
+            await update.message.reply_text("✅ Sold ALL")
+        else:
+            if target not in MEME_COINS:
+                await update.message.reply_text("Unknown coin")
+                return
+            info = MEME_COINS[target]
+            base = info['symbol'].split('/')[0]
+            free = bal.get(base, {}).get('free', 0)
+            if free > 0:
+                exchange.create_market_sell_order(info['symbol'], free)
+                if info['symbol'] in active_trades:
+                    del active_trades[info['symbol']]
+                await update.message.reply_text(f"✅ Sold {free} {target} ~${free*get_price(info['symbol']):.2f}")
+            else:
+                await update.message.reply_text(f"No {target} balance")
     except Exception as e:
-        await update.message.reply_text(f"❌ Sell failed: {e}")
+        await update.message.reply_text(f"Sell failed: {e}")
 
-# AUTO TP/SL LOOP
-async def auto_monitor(app_instance):
-    await asyncio.sleep(10)
-    print("Auto TP/SL monitor started")
+def monitor_trades():
     while True:
         try:
-            if trade_info["active"] and trade_info["entry_price"]:
-                ticker = exchange.fetch_ticker(SYMBOL)
-                curr_price = ticker['last']
-                entry = trade_info["entry_price"]
-                pnl = (curr_price - entry) / entry * 100
-                
-                print(f"Monitor: Entry ${entry:.2f} Now ${curr_price:.2f} PnL {pnl:.2f}%")
+            for symbol, trade in list(active_trades.items()):
+                now = get_price(symbol)
+                if not now:
+                    continue
+                pnl = (now - trade['entry']) / trade['entry'] * 100
+                if pnl >= trade['tp'] or pnl <= -trade['sl']:
+                    try:
+                        bal = exchange.fetch_balance()
+                        base = symbol.split('/')[0]
+                        free = bal.get(base, {}).get('free', 0)
+                        if free > 0:
+                            exchange.create_market_sell_order(symbol, free)
+                            print(f"AUTO SOLD {symbol} PnL {pnl:.2f}%")
+                        if symbol in active_trades:
+                            del active_trades[symbol]
+                    except Exception as e:
+                        print(f"Auto sell error {symbol}: {e}")
+            time.sleep(3)  # Faster check for meme coins!
+        except:
+            time.sleep(5)
 
-                if pnl >= TP_PERCENT or pnl <= -SL_PERCENT:
-                    # TP or SL Hit!
-                    bal = exchange.fetch_balance()
-                    btc_free = bal.get('BTC', {}).get('free', 0)
-                    if btc_free > 0.000001:
-                        btc_free = float(exchange.amount_to_precision(SYMBOL, btc_free))
-                        order = exchange.create_market_sell_order(SYMBOL, btc_free)
-                        
-                        reason = "TAKE PROFIT 🎯" if pnl >= TP_PERCENT else "STOP LOSS 🛑"
-                        msg = f"🤖 {reason} HIT!\n\nEntry: ${entry:.2f}\nExit: ${curr_price:.2f}\nPnL: {pnl:+.2f}%\nSold {btc_free:.8f} BTC\nOrder: {order['id']}"
-                        
-                        # Send to all? For now we try to send via bot to owner - you need to store chat_id
-                        # Simplest: log and disarm. User can check /status
-                        print(msg)
-                        # If you want telegram alert, we need chat_id - we'll broadcast via bot if possible
-                        try:
-                            # This will send to last chat - we need to save chat_id in trade_info
-                            if trade_info.get("chat_id"):
-                                await app_instance.bot.send_message(chat_id=trade_info["chat_id"], text=msg)
-                        except:
-                            pass
+def run_flask():
+    app_flask.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
 
-                        trade_info["active"] = False
-                        trade_info["entry_price"] = None
-                        trade_info["btc_amount"] = 0
-            await asyncio.sleep(30)
-        except Exception as e:
-            print(f"Monitor error: {e}")
-            await asyncio.sleep(30)
-
-async def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+if __name__ == '__main__':
+    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=monitor_trades, daemon=True).start()
     
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("status", status_cmd))
-    application.add_handler(CommandHandler("balance", balance_cmd))
-    application.add_handler(CommandHandler("price", price_cmd))
-    application.add_handler(CommandHandler("buy", buy_cmd))
-    application.add_handler(CommandHandler("sell", sell_cmd))
-
-    # Save chat_id on buy for auto alerts
-    original_buy = buy_cmd
-    async def buy_wrapper(update, context):
-        if update.effective_chat:
-            trade_info["chat_id"] = update.effective_chat.id
-        await original_buy(update, context)
-    application.add_handler(CommandHandler("buy", buy_wrapper))
-
-    await application.bot.delete_webhook(drop_pending_updates=True)
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
-    
-    # Start auto monitor
-    asyncio.create_task(auto_monitor(application))
-    
-    print("Bot Live with Auto TP/SL")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    Thread(target=run_flask, daemon=True).start()
-    asyncio.run(main())
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("balance", balance_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("buy", buy_cmd))
+    app.add_handler(CommandHandler("sell", sell_cmd))
+    print("MEME COIN BOT STARTED 🐸🚀")
+    app.run_polling()
