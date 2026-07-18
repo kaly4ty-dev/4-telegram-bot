@@ -1,201 +1,292 @@
-import os, time, threading, json
+import os
+import time
+import telebot
 import ccxt
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from flask import Flask
+import threading
+from dotenv import load_dotenv
+from keep_alive import keep_alive
+from tinydb import TinyDB, Query
 
-BOT_TOKEN = os.getenv('BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN')
-MEXC_API_KEY = os.getenv('MEXC_API_KEY')
-MEXC_SECRET = os.getenv('MEXC_SECRET') or os.getenv('MEXC_API_SECRET')
+# Load environment variables
+load_dotenv()
 
-print(f"ENV: BOT_TOKEN={bool(BOT_TOKEN)} KEY={bool(MEXC_API_KEY)} SECRET={bool(MEXC_SECRET)}")
+# --- CONFIGURATION ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+MEXC_API_KEY = os.getenv("MEXC_API_KEY", "")
+MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY", "")
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", 0))
 
-if not BOT_TOKEN:
-    print("ERROR: BOT_TOKEN missing!")
-    exit(1)
-
-# === SPECIAL SAFE PARAMETERS - WON'T LOSE MONEY ===
-CONFIG = {
-    "BTC":  {"symbol": "BTC/USDT",  "tp": 2.5, "sl": 1.2, "max_usdt": 5},
-    "PEPE": {"symbol": "PEPE/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3},
-    "DOGE": {"symbol": "DOGE/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3},
-    "SHIB": {"symbol": "SHIB/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3},
-    "BONK": {"symbol": "BONK/USDT", "tp": 6.0, "sl": 3.0, "max_usdt": 2},
-}
-
-TRADE_FILE = "active_trades.json"
-def load_trades():
-    try:
-        if os.path.exists(TRADE_FILE):
-            with open(TRADE_FILE,'r') as f: return json.load(f)
-    except: pass
-    return {}
-def save_trades(d):
-    try:
-        with open(TRADE_FILE,'w') as f: json.dump(d,f)
-    except: pass
-
-active_trades = load_trades()
-daily_loss = 0
-MAX_DAILY_LOSS = 3.0
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 exchange = ccxt.mexc({
     'apiKey': MEXC_API_KEY,
-    'secret': MEXC_SECRET,
+    'secret': MEXC_SECRET_KEY,
     'enableRateLimit': True,
     'options': {'defaultType': 'spot'}
 })
 
-flask_app = Flask(__name__)
-@flask_app.route('/')
-def home():
-    return "SAFE MEME+BTC Bot LIVE - BTC 2.5%/1.2% MEME 5%/2.5% ANTI-LOSS"
+# --- DATABASE SETUP ---
+# Initialize TinyDB. This will create a 'trades.json' file locally.
+db = TinyDB('trades.json')
+TradeQuery = Query()
 
-def get_ticker(s):
-    try:
-        t = exchange.fetch_ticker(s)
-        return t['last'], 0
-    except: return None,0
+# --- GLOBAL STATE ---
+known_markets = set()
+scanner_active = False
+auto_buy_new_coins = False
+AUTO_BUY_AMOUNT = 5 # USDT to spend on newly detected coins
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("SAFE BOT - ANTI-LOSS\nBTC TP +2.5% SL -1.2% Max $5\nMEME TP 5-6% SL 2.5-3% Max $2-3\nDaily STOP -$3\n\n/buy 3 btc\n/buy 2 pepe\n/buy 2 doge\n/buy 2 shib\n/buy 2 bonk\n/balance\n/status\n/price\n/sell all")
+def is_authorized(message):
+    return message.from_user.id == ALLOWED_USER_ID
 
-async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg="Prices\n"
-    for k in CONFIG:
-        p,_=get_ticker(CONFIG[k]['symbol'])
-        if p: msg+=f"{k}: ${p}\n"
-    await update.message.reply_text(msg)
+# ==========================================
+# DATABASE HELPERS
+# ==========================================
+def save_trade(symbol, amount, buy_price, tp_pct, tsl_pct):
+    db.upsert({
+        'symbol': symbol,
+        'amount': amount,
+        'buy_price': buy_price,
+        'highest_price': buy_price,
+        'tp_pct': tp_pct,
+        'tsl_pct': tsl_pct
+    }, TradeQuery.symbol == symbol)
 
-async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        bal=exchange.fetch_balance()
-        usdt=bal.get('USDT',{}).get('free',0)
-        await update.message.reply_text(f"USDT: ${usdt:.4f} Daily Loss: ${daily_loss:.2f}")
-    except Exception as e:
-        await update.message.reply_text(f"Error {e}")
+def remove_trade(symbol):
+    db.remove(TradeQuery.symbol == symbol)
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not active_trades:
-        await update.message.reply_text("No trades. /buy 2 pepe")
-        return
-    msg="Active\n"
-    for sym,t in active_trades.items():
-        now,_=get_ticker(sym)
-        if now:
-            pnl=(now-t['entry'])/t['entry']*100
-            msg+=f"{t['coin']} PnL {pnl:+.2f}% TP {t['tp']}% SL {t['sl']}%\n"
-    await update.message.reply_text(msg)
+def update_highest_price(symbol, highest_price):
+    db.update({'highest_price': highest_price}, TradeQuery.symbol == symbol)
 
-async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global daily_loss
-    try:
-        if daily_loss <= -MAX_DAILY_LOSS:
-            await update.message.reply_text(f"Daily -${MAX_DAILY_LOSS} stop!")
-            return
-        if len(context.args)<2:
-            await update.message.reply_text("Usage: /buy 2 pepe or /buy 3 btc")
-            return
-        amount=float(context.args[0])
-        coin=context.args[1].upper()
-        if coin not in CONFIG:
-            await update.message.reply_text(f"Use: {', '.join(CONFIG.keys())}")
-            return
-        cfg=CONFIG[coin]
-        if amount>cfg['max_usdt']:
-            await update.message.reply_text(f"Max for {coin} is ${cfg['max_usdt']}")
-            return
-        price,_=get_ticker(cfg['symbol'])
-        if not price:
-            await update.message.reply_text("No price")
-            return
-        bal=exchange.fetch_balance()
-        free=bal.get('USDT',{}).get('free',0)
-        if free<amount:
-            await update.message.reply_text(f"Need ${amount} have ${free:.2f}")
-            return
-        if cfg['symbol'] in active_trades:
-            await update.message.reply_text(f"Already have {coin}. /sell {coin.lower()} first")
-            return
-        await update.message.reply_text(f"Buying ${amount} {coin} @ ${price}...")
-        qty=amount/price
-        order=exchange.create_market_buy_order(cfg['symbol'], qty)
-        active_trades[cfg['symbol']]={"coin":coin,"entry":price,"amount":qty,"tp":cfg['tp'],"sl":cfg['sl'],"invested":amount}
-        save_trades(active_trades)
-        await update.message.reply_text(f"BOUGHT {coin} @ ${price} TP +{cfg['tp']}% SL -{cfg['sl']}%")
-    except Exception as e:
-        await update.message.reply_text(f"Buy fail: {e}")
+def get_all_trades():
+    return db.all()
 
-async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not context.args:
-            await update.message.reply_text("Use /sell pepe or /sell all")
-            return
-        target=context.args[0].upper()
-        bal=exchange.fetch_balance()
-        if target=="ALL":
-            for k,cfg in CONFIG.items():
-                base=cfg['symbol'].split('/')[0]
-                free=bal.get(base,{}).get('free',0)
-                if free>0:
-                    try:
-                        exchange.create_market_sell_order(cfg['symbol'], free)
-                        if cfg['symbol'] in active_trades: del active_trades[cfg['symbol']]
-                    except: pass
-            save_trades(active_trades)
-            await update.message.reply_text("Sold ALL")
-        else:
-            if target not in CONFIG:
-                await update.message.reply_text("Unknown")
-                return
-            cfg=CONFIG[target]
-            base=cfg['symbol'].split('/')[0]
-            free=bal.get(base,{}).get('free',0)
-            if free>0:
-                exchange.create_market_sell_order(cfg['symbol'], free)
-                if cfg['symbol'] in active_trades: del active_trades[cfg['symbol']]
-                save_trades(active_trades)
-                await update.message.reply_text(f"Sold {target}")
-            else:
-                await update.message.reply_text(f"No {target}")
-    except Exception as e:
-        await update.message.reply_text(f"Sell fail: {e}")
-
-def monitor_loop():
-    global daily_loss
+# ==========================================
+# BACKGROUND WORKERS
+# ==========================================
+def monitor_trades():
+    """Background thread that constantly checks active trades for TP/TSL."""
     while True:
-        try:
-            for sym,t in list(active_trades.items()):
-                price,_=get_ticker(sym)
-                if not price: continue
-                pnl=(price-t['entry'])/t['entry']*100
-                if pnl>=t['tp'] or pnl<=-t['sl']:
-                    try:
-                        bal=exchange.fetch_balance()
-                        base=sym.split('/')[0]
-                        free=bal.get(base,{}).get('free',0)
-                        if free>0:
-                            exchange.create_market_sell_order(sym, free)
-                            if pnl<0: daily_loss+= t['invested']*pnl/100
-                        if sym in active_trades: del active_trades[sym]
-                        save_trades(active_trades)
-                    except: pass
-            time.sleep(5)
-        except:
-            time.sleep(5)
+        active_trades = get_all_trades()
+        if active_trades:
+            try:
+                tickers = exchange.fetch_tickers()
+                
+                for trade in active_trades:
+                    symbol = trade['symbol']
+                    if symbol not in tickers: continue
+                    
+                    current_price = tickers[symbol]['last']
+                    if not current_price: continue
 
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
+                    # 1. Update highest price seen (for Trailing Stop)
+                    if current_price > trade['highest_price']:
+                        update_highest_price(symbol, current_price)
+                        trade['highest_price'] = current_price # Update local variable for next checks
 
-if __name__ == '__main__':
-    threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    print("SAFE MEME+BTC BOT STARTED - FIXED FOR PYTHON 3.11")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("price", price_cmd))
-    app.add_handler(CommandHandler("balance", balance_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("buy", buy_cmd))
-    app.add_handler(CommandHandler("sell", sell_cmd))
-    app.run_polling()
+                    # 2. Check Take Profit (TP)
+                    tp_price = trade['buy_price'] * (1 + (trade['tp_pct'] / 100))
+                    if current_price >= tp_price:
+                        bot.send_message(ALLOWED_USER_ID, f"🎯 *TAKE PROFIT TRIGGERED!*\nSelling {symbol} at `${current_price:.6f}`", parse_mode='Markdown')
+                        try:
+                            exchange.create_market_sell_order(symbol, trade['amount'])
+                        except Exception as e:
+                            bot.send_message(ALLOWED_USER_ID, f"❌ Failed to execute TP sell: {e}")
+                        remove_trade(symbol)
+                        continue
+                    
+                    # 3. Check Trailing Stop Loss (TSL)
+                    tsl_price = trade['highest_price'] * (1 - (trade['tsl_pct'] / 100))
+                    if current_price <= tsl_price:
+                        bot.send_message(ALLOWED_USER_ID, f"🛑 *TRAILING STOP TRIGGERED!*\nSelling {symbol} at `${current_price:.6f}`\n(Dropped from peak of `${trade['highest_price']:.6f}`)", parse_mode='Markdown')
+                        try:
+                            exchange.create_market_sell_order(symbol, trade['amount'])
+                        except Exception as e:
+                            bot.send_message(ALLOWED_USER_ID, f"❌ Failed to execute TSL sell: {e}")
+                        remove_trade(symbol)
+
+            except Exception as e:
+                print(f"Error in trade monitor: {e}")
+                
+        time.sleep(5) # Check prices every 5 seconds
+
+def monitor_new_coins():
+    """Background thread that checks for newly listed coins on MEXC."""
+    global known_markets
+    
+    # Initial population of known markets
+    try:
+        markets = exchange.fetch_markets()
+        known_markets = {m['symbol'] for m in markets if m['quote'] == 'USDT'}
+        print(f"Loaded {len(known_markets)} existing markets.")
+    except Exception as e:
+        print(f"Failed to load markets: {e}")
+
+    while True:
+        if scanner_active:
+            try:
+                markets = exchange.fetch_markets()
+                current_markets = {m['symbol'] for m in markets if m['quote'] == 'USDT'}
+                
+                new_coins = current_markets - known_markets
+                
+                if new_coins:
+                    for coin in new_coins:
+                        msg = f"🚨 *NEW COIN DETECTED ON MEXC:* `{coin}`"
+                        bot.send_message(ALLOWED_USER_ID, msg, parse_mode='Markdown')
+                        
+                        if auto_buy_new_coins:
+                            bot.send_message(ALLOWED_USER_ID, f"⚡ Auto-buying ${AUTO_BUY_AMOUNT} of {coin}...")
+                            try:
+                                ticker = exchange.fetch_ticker(coin)
+                                price = ticker['last']
+                                base_amount = AUTO_BUY_AMOUNT / price
+                                exchange.create_market_buy_order(coin, base_amount)
+                                
+                                # Save to TinyDB (Default 20% TP, 10% TSL)
+                                save_trade(coin, base_amount, price, 20.0, 10.0)
+                                bot.send_message(ALLOWED_USER_ID, f"✅ Auto-buy success. Added to smart tracker (20% TP, 10% TSL).")
+                            except Exception as e:
+                                bot.send_message(ALLOWED_USER_ID, f"❌ Auto-buy failed: {e}")
+
+                    # Update known markets
+                    known_markets = current_markets
+            except Exception as e:
+                print(f"Error in scanner: {e}")
+                
+        time.sleep(30) # Poll MEXC every 30 seconds for new listings
+
+
+# ==========================================
+# TELEGRAM COMMANDS
+# ==========================================
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    if not is_authorized(message): return
+    help_text = (
+        "🤖 *Advanced MEXC Trading Bot (Database Enabled)*\n\n"
+        "👉 `/balance` - Check balances\n"
+        "👉 `/price <symbol>` - Get current price\n"
+        "👉 `/smartbuy <symbol> <$USDT> <TP%> <TSL%>` - Buy with auto Take Profit & Trailing Stop\n"
+        "👉 `/trades` - View monitored trades\n"
+        "👉 `/sell <symbol> <amount>` - Manual Sell\n\n"
+        "🔍 *Scanner & Auto-Sniper*\n"
+        "👉 `/scanner` - Toggle new coin detection\n"
+        "👉 `/autobuy` - Toggle instant buying of new coins"
+    )
+    bot.reply_to(message, help_text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['scanner'])
+def toggle_scanner(message):
+    if not is_authorized(message): return
+    global scanner_active
+    scanner_active = not scanner_active
+    status = "ON 🟢" if scanner_active else "OFF 🔴"
+    bot.reply_to(message, f"New Coin Scanner is now {status}")
+
+@bot.message_handler(commands=['autobuy'])
+def toggle_autobuy(message):
+    if not is_authorized(message): return
+    global auto_buy_new_coins
+    auto_buy_new_coins = not auto_buy_new_coins
+    status = "ON 🟢" if auto_buy_new_coins else "OFF 🔴"
+    msg = f"Auto-Sniper for new coins is now {status}."
+    if auto_buy_new_coins:
+        msg += f"\n⚠️ *WARNING:* It will instantly buy ${AUTO_BUY_AMOUNT} of ANY new USDT pair listed on MEXC. This is risky due to volatility/rugs."
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['trades'])
+def view_trades(message):
+    if not is_authorized(message): return
+    active_trades = get_all_trades()
+    if not active_trades:
+        bot.reply_to(message, "No active smart trades being monitored in the database.")
+        return
+        
+    msg = "📊 *Active Monitored Trades:*\n\n"
+    for trade in active_trades:
+        msg += (
+            f"🔹 *{trade['symbol']}*\n"
+            f"  • Bought At: `${trade['buy_price']:.6f}`\n"
+            f"  • Highest Reached: `${trade['highest_price']:.6f}`\n"
+            f"  • Target TP: +{trade['tp_pct']}%\n"
+            f"  • Trailing Stop: -{trade['tsl_pct']}%\n"
+        )
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['smartbuy'])
+def smart_buy_token(message):
+    if not is_authorized(message): return
+    try:
+        parts = message.text.split()
+        if len(parts) != 5:
+            bot.reply_to(message, "⚠️ Usage: `/smartbuy COIN/USDT <$USDT> <TP%> <TSL%>`\nExample: `/smartbuy BTC/USDT 50 10 5`", parse_mode='Markdown')
+            return
+
+        symbol = parts[1].upper()
+        quote_amount = float(parts[2])
+        tp_pct = float(parts[3])
+        tsl_pct = float(parts[4])
+        
+        bot.reply_to(message, f"⏳ Buying ${quote_amount} of {symbol}...")
+        
+        ticker = exchange.fetch_ticker(symbol)
+        price = ticker['last']
+        base_amount = quote_amount / price
+        
+        # Execute Market Buy
+        order = exchange.create_market_buy_order(symbol, base_amount)
+        
+        # Add to TinyDB
+        save_trade(symbol, base_amount, price, tp_pct, tsl_pct)
+        
+        bot.reply_to(message, f"✅ *SMART BUY SUCCESS!*\nBought `{base_amount:.5f}` {symbol}\nTracking for {tp_pct}% Profit or {tsl_pct}% Trailing Stop.", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Trade Failed: {str(e)}")
+
+@bot.message_handler(commands=['balance'])
+def check_balance(message):
+    if not is_authorized(message): return
+    try:
+        balance = exchange.fetch_balance()
+        active_balances = {k: v for k, v in balance['total'].items() if v > 0}
+        msg = "💰 *Your MEXC Balances:*\n" + "\n".join([f"• {k}: `{v}`" for k, v in active_balances.items()])
+        bot.reply_to(message, msg if active_balances else "Wallet empty.", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['price'])
+def check_price(message):
+    if not is_authorized(message): return
+    try:
+        symbol = message.text.split()[1].upper()
+        price = exchange.fetch_ticker(symbol)['last']
+        bot.reply_to(message, f"📈 *{symbol}*: `${price}`", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, "⚠️ Usage: `/price BTC/USDT`")
+
+@bot.message_handler(commands=['sell'])
+def sell_token(message):
+    if not is_authorized(message): return
+    try:
+        parts = message.text.split()
+        symbol, base_amount = parts[1].upper(), float(parts[2])
+        exchange.create_market_sell_order(symbol, base_amount)
+        # Remove from database if manually sold
+        remove_trade(symbol)
+        bot.reply_to(message, f"✅ *SELL SUCCESS!*\nSold `{base_amount}` of `{symbol}`", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Trade Failed: {str(e)}")
+
+if __name__ == "__main__":
+    if TELEGRAM_BOT_TOKEN:
+        print("Starting health-check Flask server...")
+        keep_alive()
+        
+        print("Starting background workers...")
+        threading.Thread(target=monitor_trades, daemon=True).start()
+        threading.Thread(target=monitor_new_coins, daemon=True).start()
+        
+        print("Starting Telegram bot polling...")
+        bot.infinity_polling()
