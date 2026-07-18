@@ -51,7 +51,7 @@ exchange = ccxt.mexc({
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
-    return "SAFE MEME+BTC Bot LIVE 🛡️ TP: BTC 3%/1% PEPE 8%/2%"
+    return "SAFE MEME+BTC Bot LIVE 🛡 TP: BTC 3%/1% PEPE 8%/2%"
 
 def get_ticker(symbol):
     try:
@@ -62,7 +62,7 @@ def get_ticker(symbol):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🛡️ SAFE BOT - WON'T LOSE MUCH!\n\n"
+        "🛡 SAFE BOT - WON'T LOSE MUCH!\n\n"
         "BTC: TP +3% SL -1% Max $5\n"
         "PEPE/DOGE/SHIB: TP +8% SL -2% Max $3\n"
         "Daily STOP if -5%\n\n"
@@ -213,7 +213,7 @@ if __name__ == '__main__':
     import threading
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=monitor, daemon=True).start()
-    print("SAFE BOT STARTED 🛡️")
+    print("SAFE BOT STARTED 🛡")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("price", price_cmd))
