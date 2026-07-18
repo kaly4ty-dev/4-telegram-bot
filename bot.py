@@ -1,4 +1,4 @@
-import os, time, threading, json, asyncio
+import os, time, threading, json
 import ccxt
 from datetime import date
 from telegram import Update
@@ -13,19 +13,14 @@ print(f"ENV CHECK: BOT_TOKEN={bool(BOT_TOKEN)} KEY={bool(MEXC_API_KEY)} SECRET={
 
 if not BOT_TOKEN:
     print("ERROR: Set BOT_TOKEN in Render!")
-    # Still start Flask so Render doesn't fail port check
-    fl = Flask(__name__)
-    @fl.route('/')
-    def home(): return "ERROR: BOT_TOKEN missing"
-    fl.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
+    exit(1)
 
-# === SPECIAL SAFE PARAMETERS - ANTI-LOSS ===
 CONFIG = {
-    "BTC":  {"symbol": "BTC/USDT",  "tp": 2.5, "sl": 1.2, "max_usdt": 5, "emoji": "₿"},
-    "PEPE": {"symbol": "PEPE/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3, "emoji": "🐸"},
-    "DOGE": {"symbol": "DOGE/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3, "emoji": "🐕"},
-    "SHIB": {"symbol": "SHIB/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3, "emoji": "🐶"},
-    "BONK": {"symbol": "BONK/USDT", "tp": 6.0, "sl": 3.0, "max_usdt": 2, "emoji": "🐾"},
+    "BTC":  {"symbol": "BTC/USDT",  "tp": 2.5, "sl": 1.2, "max_usdt": 5, "emoji": "BTC"},
+    "PEPE": {"symbol": "PEPE/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3, "emoji": "PEPE"},
+    "DOGE": {"symbol": "DOGE/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3, "emoji": "DOGE"},
+    "SHIB": {"symbol": "SHIB/USDT", "tp": 5.0, "sl": 2.5, "max_usdt": 3, "emoji": "SHIB"},
+    "BONK": {"symbol": "BONK/USDT", "tp": 6.0, "sl": 3.0, "max_usdt": 2, "emoji": "BONK"},
 }
 
 TRADE_FILE = "active_trades.json"
@@ -56,7 +51,7 @@ exchange = ccxt.mexc({
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
-    return "SAFE MEME+BTC Bot LIVE 🛡️ BTC 2.5%/1.2% MEME 5%/2.5% - ANTI-LOSS"
+    return "SAFE MEME+BTC Bot LIVE - ANTI-LOSS TP BTC 2.5% SL 1.2%"
 
 def get_ticker(symbol):
     try:
@@ -65,19 +60,11 @@ def get_ticker(symbol):
     except: return None,0
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (
-        "🛡️ *SPECIAL SAFE BOT - YOU WON'T LOSE MUCH*\n\n"
-        "BTC: TP +2.5% SL -1.2% Max $5\n"
-        "MEME PEPE/DOGE/SHIB/BONK: TP +5-6% SL -2.5-3% Max $2-3\n"
-        "Daily STOP if -$3 loss\n\n"
-        "Commands:\n"
-        "/buy 3 btc\n/buy 2 pepe\n/buy 2 doge\n/buy 2 shib\n/buy 2 bonk\n"
-        "/balance - wallet\n/status - trades\n/price - prices\n/sell btc /sell all"
-    )
-    await update.message.reply_text(txt, parse_mode='Markdown')
+    txt = "SAFE BOT - WON'T LOSE MUCH!\n\nBTC: TP +2.5% SL -1.2% Max $5\nMEME 5-6% SL 2.5-3% Max $2-3\nDaily STOP -$3\n\n/buy 3 btc\n/buy 2 pepe\n/buy 2 doge\n/buy 2 shib\n/buy 2 bonk\n/balance\n/status\n/price\n/sell all"
+    await update.message.reply_text(txt)
 
 async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg="📈 Prices\n"
+    msg="Prices\n"
     for k in ["BTC","PEPE","DOGE","SHIB","BONK"]:
         p,vol = get_ticker(CONFIG[k]['symbol'])
         if p: msg+=f"{k}: ${p} Vol {vol/1e6:.1f}M\n"
@@ -87,7 +74,7 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         bal = exchange.fetch_balance()
         usdt = bal.get('USDT',{}).get('free',0)
-        msg=f"💰 USDT Free: ${usdt:.4f}\nDaily PnL: ${daily_loss:.2f}\n\n"
+        msg=f"USDT Free: ${usdt:.4f} Daily Loss: ${daily_loss:.2f}\n\n"
         for k,cfg in CONFIG.items():
             base=cfg['symbol'].split('/')[0]
             free=bal.get(base,{}).get('free',0)
@@ -101,24 +88,24 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not active_trades:
-        await update.message.reply_text("📭 No active trades. Use /buy 2 pepe")
+        await update.message.reply_text("No active trades. Use /buy 2 pepe")
         return
-    msg="📊 Active Trades (SAFE)\n\n"
+    msg="Active Trades SAFE\n\n"
     for sym,t in active_trades.items():
         now,_=get_ticker(sym)
         if now:
             pnl=(now-t['entry'])/t['entry']*100
-            msg+=f"{t['coin']} {sym}\nEntry ${t['entry']}\nNow ${now}\nPnL {pnl:+.2f}% TP +{t['tp']}% SL -{t['sl']}%\n\n"
+            msg+=f"{t['coin']} {sym} Entry ${t['entry']} Now ${now} PnL {pnl:+.2f}% TP +{t['tp']}% SL -{t['sl']}%\n\n"
     await update.message.reply_text(msg)
 
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global daily_loss
     try:
         if daily_loss <= -MAX_DAILY_LOSS:
-            await update.message.reply_text(f"🛑 Daily loss -${MAX_DAILY_LOSS} reached! Stops today to protect you.")
+            await update.message.reply_text(f"Daily loss -${MAX_DAILY_LOSS} reached! Stops today.")
             return
         if len(context.args)<2:
-            await update.message.reply_text("Usage: /buy 2 pepe  or  /buy 3 btc")
+            await update.message.reply_text("Usage: /buy 2 pepe or /buy 3 btc")
             return
         amount=float(context.args[0])
         coin=context.args[1].upper()
@@ -127,7 +114,7 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         cfg=CONFIG[coin]
         if amount>cfg['max_usdt']:
-            await update.message.reply_text(f"🛡️ Safety limit! Max for {coin} is ${cfg['max_usdt']}. You tried ${amount}")
+            await update.message.reply_text(f"Safety limit! Max for {coin} is ${cfg['max_usdt']}")
             return
         price,vol=get_ticker(cfg['symbol'])
         if not price:
@@ -136,19 +123,19 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bal=exchange.fetch_balance()
         free_usdt=bal.get('USDT',{}).get('free',0)
         if free_usdt<amount:
-            await update.message.reply_text(f"❌ Need ${amount} have ${free_usdt:.2f}")
+            await update.message.reply_text(f"Need ${amount} have ${free_usdt:.2f}")
             return
         if cfg['symbol'] in active_trades:
-            await update.message.reply_text(f"Already have {coin} active. /sell {coin.lower()} first")
+            await update.message.reply_text(f"Already have {coin}. /sell {coin.lower()} first")
             return
-        await update.message.reply_text(f"⏳ Buying ${amount} {coin} @ ${price}...")
+        await update.message.reply_text(f"Buying ${amount} {coin} @ ${price}...")
         qty=amount/price
         order=exchange.create_market_buy_order(cfg['symbol'], qty)
         active_trades[cfg['symbol']]={"coin":coin,"entry":price,"amount":qty,"tp":cfg['tp'],"sl":cfg['sl'],"invested":amount}
         save_trades(active_trades)
-        await update.message.reply_text(f"✅ BOUGHT {coin} {cfg['emoji']}\nPrice ${price}\nAuto TP +{cfg['tp']}% SL -{cfg['sl']}%")
+        await update.message.reply_text(f"BOUGHT {coin} {cfg['emoji']} Price ${price} Auto TP +{cfg['tp']}% SL -{cfg['sl']}%")
     except Exception as e:
-        await update.message.reply_text(f"❌ Buy failed: {e}")
+        await update.message.reply_text(f"Buy failed: {e}")
 
 async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -167,7 +154,7 @@ async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if cfg['symbol'] in active_trades: del active_trades[cfg['symbol']]
                     except: pass
             save_trades(active_trades)
-            await update.message.reply_text("✅ Sold ALL")
+            await update.message.reply_text("Sold ALL")
         else:
             if target not in CONFIG:
                 await update.message.reply_text("Unknown coin")
@@ -179,7 +166,7 @@ async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 exchange.create_market_sell_order(cfg['symbol'], free)
                 if cfg['symbol'] in active_trades: del active_trades[cfg['symbol']]
                 save_trades(active_trades)
-                await update.message.reply_text(f"✅ Sold {target}")
+                await update.message.reply_text(f"Sold {target}")
             else:
                 await update.message.reply_text(f"No {target}")
     except Exception as e:
@@ -215,7 +202,13 @@ def monitor_loop():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
 
-async def main():
+if __name__ == '__main__':
+    # Flask + Monitor in threads (daemon)
+    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=monitor_loop, daemon=True).start()
+    
+    # FIX FOR PYTHON 3.14 - use run_polling() directly, NOT asyncio.run()
+    print("SAFE MEME+BTC BOT STARTED - ANTI-LOSS")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("price", price_cmd))
@@ -223,10 +216,5 @@ async def main():
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("buy", buy_cmd))
     app.add_handler(CommandHandler("sell", sell_cmd))
-    print("SAFE MEME+BTC BOT STARTED - Python 3.14 compatible")
-    await app.run_polling()
-
-if __name__ == '__main__':
-    threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    asyncio.run(main())
+    # This is the correct way for 20.7 - blocking call
+    app.run_polling()
