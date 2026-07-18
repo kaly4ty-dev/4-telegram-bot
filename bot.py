@@ -4,7 +4,7 @@ import telebot
 import ccxt
 import threading
 from dotenv import load_dotenv
-from keep_alive import keep_alive
+from flask import Flask
 from tinydb import TinyDB, Query
 
 # Load environment variables
