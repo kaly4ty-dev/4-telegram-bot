@@ -1,180 +1,332 @@
 import os
 import time
-import requests
-import base58
+import telebot
+import ccxt
+import threading
 from dotenv import load_dotenv
-from solders.keypair import Keypair
-from solders.transaction import VersionedTransaction
-from solana.rpc.api import Client
-from solana.rpc.commitment import Confirmed
+from tinydb import TinyDB, Query
+from flask import Flask, request, abort
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
-# --- CONFIGURATION ---
-PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY", "")
-RPC_URL = os.getenv("RPC_URL", "https://api.mainnet-beta.solana.com")
+# ==========================================
+# CONFIGURATION
+# ==========================================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+MEXC_API_KEY = os.getenv("MEXC_API_KEY", "").strip()
+MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY", "").strip()
 
-# Token setup
-# By default, trading WSOL for USDC. You can swap these to trade meme coins.
-# Example: Base token = MEME mint address, Quote token = USDC or SOL
-BASE_TOKEN_MINT = "So11111111111111111111111111111111111111112"  # WSOL
-BASE_DECIMALS = 9
-QUOTE_TOKEN_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" # USDC
-QUOTE_DECIMALS = 6
+# Render automatically provides this variable with your app URL (e.g. https://four-telegram-bot.onrender.com)
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 
-# Grid settings
-LOWER_PRICE = 130.0   # Lower boundary of the grid
-UPPER_PRICE = 170.0   # Upper boundary of the grid
-GRID_LEVELS = 5       # Number of grid levels
-TRADE_SIZE = 5.0      # Amount of Quote Token (e.g. 5 USDC) to spend per buy order
-CHECK_INTERVAL = 10   # Seconds to wait between price checks
-SLIPPAGE_BPS = 50     # Slippage tolerance in basis points (50 = 0.5%)
+allowed_user_str = os.getenv("ALLOWED_USER_ID", "").strip()
+try:
+    ALLOWED_USER_ID = int(allowed_user_str) if allowed_user_str else 0
+except ValueError:
+    ALLOWED_USER_ID = 0
 
-# Jupiter API endpoints (Best aggregator on Solana)
-JUPITER_QUOTE_API = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP_API = "https://quote-api.jup.ag/v6/swap"
-# ---------------------
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
-def calculate_grids(lower, upper, levels):
-    """Calculates price levels for the grid."""
-    step = (upper - lower) / (levels - 1)
-    return [lower + (step * i) for i in range(levels)]
+exchange = ccxt.mexc({
+    'apiKey': MEXC_API_KEY,
+    'secret': MEXC_SECRET_KEY,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'spot'}
+})
 
-def get_price_and_quote(input_mint, output_mint, amount_in_lamports):
-    """Fetches quote from Jupiter API to determine current price or route."""
-    params = {
-        "inputMint": input_mint,
-        "outputMint": output_mint,
-        "amount": amount_in_lamports,
-        "slippageBps": SLIPPAGE_BPS
-    }
-    try:
-        response = requests.get(JUPITER_QUOTE_API, params=params)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"Error fetching quote: {e}")
-        return None
+# --- DATABASE SETUP ---
+db_path = os.environ.get("DB_PATH", "trades.json")
+db = TinyDB(db_path)
+TradeQuery = Query()
 
-def execute_swap(client, keypair, quote_response):
-    """Builds and executes the swap transaction via Jupiter."""
-    if not PRIVATE_KEY:
-        print("[!] No private key provided. Running in PAPER TRADING mode.")
-        return None
+# --- GLOBAL STATE ---
+known_markets = set()
+scanner_active = False
+auto_buy_new_coins = False
+AUTO_BUY_AMOUNT = 5 # USDT
 
-    try:
-        # Request serialized transaction from Jupiter
-        payload = {
-            "quoteResponse": quote_response,
-            "userPublicKey": str(keypair.pubkey()),
-            "wrapAndUnwrapSol": True,
-            "dynamicComputeUnitLimit": True,
-            "prioritizationFeeLamports": "auto"
-        }
-        res = requests.post(JUPITER_SWAP_API, json=payload)
-        res.raise_for_status()
-        swap_data = res.json()
-        
-        swap_transaction = swap_data.get("swapTransaction")
-        if not swap_transaction:
-            print("Failed to get swapTransaction from Jupiter.")
-            return None
+def is_authorized(message):
+    return message.from_user.id == ALLOWED_USER_ID
 
-        # Decode transaction
-        raw_tx = base58.b58decode(swap_transaction)
-        tx = VersionedTransaction.from_bytes(raw_tx)
-        
-        # Sign transaction
-        signed_tx = VersionedTransaction(tx.message, [keypair])
-        
-        # Send transaction
-        tx_sig = client.send_raw_transaction(bytes(signed_tx), opts=None)
-        print(f"✅ Transaction submitted! Signature: https://solscan.io/tx/{tx_sig.value}")
-        return tx_sig.value
+# ==========================================
+# FLASK WEBHOOK SERVER (THE 409 FIX)
+# ==========================================
+app = Flask(__name__)
 
-    except Exception as e:
-        print(f"❌ Swap execution failed: {e}")
-        return None
+@app.route('/', methods=['GET'])
+def home():
+    if not TELEGRAM_BOT_TOKEN:
+        return "ERROR: Bot Token is missing!"
+    return "✅ Bot Webhook Server is running and alive!"
 
-def main():
-    print("🚀 Starting Solana Grid Trading Bot via Jupiter API...")
-    
-    keypair = None
-    if PRIVATE_KEY:
-        try:
-            keypair = Keypair.from_bytes(base58.b58decode(PRIVATE_KEY))
-            print(f"Wallet loaded: {keypair.pubkey()}")
-        except Exception as e:
-            print(f"Invalid private key format: {e}")
-            return
+# This route receives instant pushes from Telegram
+@app.route('/' + TELEGRAM_BOT_TOKEN, methods=['POST'])
+def receive_update():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "OK", 200
     else:
-        print("⚠️ Running in PAPER TRADING mode. Set SOLANA_PRIVATE_KEY in .env to trade live.")
+        abort(403)
 
-    client = Client(RPC_URL, commitment=Confirmed)
-    
-    # 1. Setup the grids
-    grids = calculate_grids(LOWER_PRICE, UPPER_PRICE, GRID_LEVELS)
-    print(f"📊 Grid Levels: {[round(g, 4) for g in grids]}")
-    
-    # Track the last executed grid level
-    last_grid_index = None
-
+# ==========================================
+# BACKGROUND WORKERS
+# ==========================================
+def monitor_trades():
     while True:
         try:
-            # Check price by getting a quote for 1 Base Token to Quote Token
-            base_unit = int(1 * (10 ** BASE_DECIMALS))
-            quote_data = get_price_and_quote(BASE_TOKEN_MINT, QUOTE_TOKEN_MINT, base_unit)
-            
-            if not quote_data:
-                time.sleep(CHECK_INTERVAL)
-                continue
-                
-            out_amount = int(quote_data["outAmount"])
-            current_price = out_amount / (10 ** QUOTE_DECIMALS)
-            print(f"Current Price: {current_price:.4f} USDC")
+            active_trades = db.all()
+            if active_trades:
+                tickers = exchange.fetch_tickers()
+                for trade in active_trades:
+                    symbol = trade['symbol']
+                    if symbol not in tickers: continue
+                    
+                    current_price = tickers[symbol]['last']
+                    if not current_price: continue
 
-            # Determine nearest grid level
-            nearest_index = min(range(len(grids)), key=lambda i: abs(grids[i] - current_price))
-            nearest_grid = grids[nearest_index]
+                    if current_price > trade['highest_price']:
+                        db.update({'highest_price': current_price}, TradeQuery.symbol == symbol)
+                        trade['highest_price'] = current_price
 
-            if last_grid_index is None:
-                # Initialize state on first run
-                last_grid_index = nearest_index
-                print(f"Initialized state at grid level {nearest_index} (${nearest_grid:.4f})")
-            
-            else:
-                # 2. Grid Trading Logic
-                if nearest_index < last_grid_index:
-                    # Price dropped to a lower grid level -> BUY!
-                    print(f"📉 Price dropped to Grid {nearest_index} (${nearest_grid:.4f}). Executing BUY...")
+                    tp_price = trade['buy_price'] * (1 + (trade['tp_pct'] / 100))
+                    if current_price >= tp_price:
+                        if bot: bot.send_message(ALLOWED_USER_ID, f"🎯 *TAKE PROFIT TRIGGERED!*\nSelling {symbol} at `${current_price:.6f}`", parse_mode='Markdown')
+                        try:
+                            exchange.create_market_sell_order(symbol, trade['amount'])
+                        except Exception as e:
+                            if bot: bot.send_message(ALLOWED_USER_ID, f"❌ Failed to execute TP sell: {e}")
+                        db.remove(TradeQuery.symbol == symbol)
+                        continue
                     
-                    # Quote to buy BASE token using TRADE_SIZE of QUOTE token
-                    trade_amount_lamports = int(TRADE_SIZE * (10 ** QUOTE_DECIMALS))
-                    buy_quote = get_price_and_quote(QUOTE_TOKEN_MINT, BASE_TOKEN_MINT, trade_amount_lamports)
-                    
-                    if buy_quote:
-                        execute_swap(client, keypair, buy_quote)
-                    
-                    last_grid_index = nearest_index
-
-                elif nearest_index > last_grid_index:
-                    # Price rose to a higher grid level -> SELL!
-                    print(f"📈 Price rose to Grid {nearest_index} (${nearest_grid:.4f}). Executing SELL...")
-                    
-                    # Calculate how much BASE token to sell based on USD target size
-                    sell_amount_lamports = int((TRADE_SIZE / current_price) * (10 ** BASE_DECIMALS))
-                    sell_quote = get_price_and_quote(BASE_TOKEN_MINT, QUOTE_TOKEN_MINT, sell_amount_lamports)
-                    
-                    if sell_quote:
-                        execute_swap(client, keypair, sell_quote)
-                    
-                    last_grid_index = nearest_index
-            
+                    tsl_price = trade['highest_price'] * (1 - (trade['tsl_pct'] / 100))
+                    if current_price <= tsl_price:
+                        if bot: bot.send_message(ALLOWED_USER_ID, f"🛑 *TRAILING STOP TRIGGERED!*\nSelling {symbol} at `${current_price:.6f}`\n(Dropped from peak of `${trade['highest_price']:.6f}`)", parse_mode='Markdown')
+                        try:
+                            exchange.create_market_sell_order(symbol, trade['amount'])
+                        except Exception as e:
+                            if bot: bot.send_message(ALLOWED_USER_ID, f"❌ Failed to execute TSL sell: {e}")
+                        db.remove(TradeQuery.symbol == symbol)
         except Exception as e:
-            print(f"An error occurred in the main loop: {e}")
-            
-        time.sleep(CHECK_INTERVAL)
+            print(f"Error in trade monitor: {e}")
+        time.sleep(5)
 
+def monitor_new_coins():
+    global known_markets
+    try:
+        markets = exchange.fetch_markets()
+        known_markets = {m['symbol'] for m in markets if m['quote'] == 'USDT'}
+    except Exception as e:
+        pass
+
+    while True:
+        if scanner_active:
+            try:
+                markets = exchange.fetch_markets()
+                current_markets = {m['symbol'] for m in markets if m['quote'] == 'USDT'}
+                new_coins = current_markets - known_markets
+                
+                if new_coins:
+                    for coin in new_coins:
+                        msg = f"🚨 *NEW COIN DETECTED ON MEXC:* `{coin}`"
+                        if bot: bot.send_message(ALLOWED_USER_ID, msg, parse_mode='Markdown')
+                        
+                        if auto_buy_new_coins:
+                            if bot: bot.send_message(ALLOWED_USER_ID, f"⚡ Auto-buying ${AUTO_BUY_AMOUNT} of {coin}...")
+                            try:
+                                exchange.options['createMarketBuyOrderRequiresPrice'] = False
+                                exchange.create_market_buy_order(coin, AUTO_BUY_AMOUNT)
+                                
+                                ticker = exchange.fetch_ticker(coin)
+                                price = ticker['last']
+                                base_amount = AUTO_BUY_AMOUNT / price
+                                
+                                db.upsert({
+                                    'symbol': coin,
+                                    'amount': base_amount,
+                                    'buy_price': price,
+                                    'highest_price': price,
+                                    'tp_pct': 20.0,
+                                    'tsl_pct': 10.0
+                                }, TradeQuery.symbol == coin)
+                                if bot: bot.send_message(ALLOWED_USER_ID, f"✅ Auto-buy success. Added to smart tracker (20% TP, 10% TSL).")
+                            except Exception as e:
+                                if bot: bot.send_message(ALLOWED_USER_ID, f"❌ Auto-buy failed: {e}")
+                    known_markets = current_markets
+            except Exception as e:
+                pass
+        time.sleep(30)
+
+# ==========================================
+# TELEGRAM COMMANDS
+# ==========================================
+if bot:
+    @bot.message_handler(commands=['start', 'help'])
+    def send_welcome(message):
+        if not is_authorized(message): return
+        help_text = (
+            "🤖 *Advanced MEXC Trading Bot*\n\n"
+            "👉 `/balance` - Check balances\n"
+            "👉 `/price <symbol>` - Get current price\n"
+            "👉 `/smartbuy <symbol> <$USDT> <TP%> <TSL%>`\n"
+            "👉 `/trades` - View monitored trades\n"
+            "👉 `/sell <symbol> <amount>` - Manual Sell\n\n"
+            "🔍 *Scanner & Auto-Sniper*\n"
+            "👉 `/scanner` - Toggle new coin detection\n"
+            "👉 `/autobuy` - Toggle instant buying of new coins\n"
+            "👉 `/status` - Check API Key Status"
+        )
+        bot.reply_to(message, help_text, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['status'])
+    def check_status(message):
+        if not is_authorized(message): return
+        api_len = len(MEXC_API_KEY)
+        sec_len = len(MEXC_SECRET_KEY)
+        msg = "🤖 *Bot Diagnostics & Status:*\n\n"
+        msg += f"🔑 **MEXC_API_KEY:** {'✅ Loaded' if api_len > 0 else '❌ MISSING'}\n"
+        msg += f"🔐 **MEXC_SECRET_KEY:** {'✅ Loaded' if sec_len > 0 else '❌ MISSING'}\n"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['scanner'])
+    def toggle_scanner(message):
+        if not is_authorized(message): return
+        global scanner_active
+        scanner_active = not scanner_active
+        status = "ON 🟢" if scanner_active else "OFF 🔴"
+        bot.reply_to(message, f"New Coin Scanner is now {status}")
+
+    @bot.message_handler(commands=['autobuy'])
+    def toggle_autobuy(message):
+        if not is_authorized(message): return
+        global auto_buy_new_coins
+        auto_buy_new_coins = not auto_buy_new_coins
+        status = "ON 🟢" if auto_buy_new_coins else "OFF 🔴"
+        msg = f"Auto-Sniper for new coins is now {status}."
+        if auto_buy_new_coins:
+            msg += f"\n⚠️ *WARNING:* It will instantly buy ${AUTO_BUY_AMOUNT} of ANY new USDT pair listed on MEXC. This is risky due to volatility/rugs."
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['trades'])
+    def view_trades(message):
+        if not is_authorized(message): return
+        active_trades = db.all()
+        if not active_trades:
+            bot.reply_to(message, "No active smart trades being monitored in the database.")
+            return
+            
+        msg = "📊 *Active Monitored Trades:*\n\n"
+        for trade in active_trades:
+            msg += (
+                f"🔹 *{trade['symbol']}*\n"
+                f"  • Bought At: `${trade['buy_price']:.6f}`\n"
+                f"  • Highest Reached: `${trade['highest_price']:.6f}`\n"
+                f"  • Target TP: +{trade['tp_pct']}%\n"
+                f"  • Trailing Stop: -{trade['tsl_pct']}%\n"
+            )
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['smartbuy'])
+    def smart_buy_token(message):
+        if not is_authorized(message): return
+        try:
+            parts = message.text.split()
+            if len(parts) != 5:
+                bot.reply_to(message, "⚠️ Usage: `/smartbuy COIN/USDT <$USDT> <TP%> <TSL%>`\nExample: `/smartbuy BTC/USDT 50 10 5`", parse_mode='Markdown')
+                return
+
+            symbol = parts[1].upper()
+            quote_amount = float(parts[2])
+            tp_pct = float(parts[3])
+            tsl_pct = float(parts[4])
+            
+        bot.reply_to(message, f"⏳ Buying ${quote_amount} of {symbol}...")
+        
+        # In CCXT for MEXC, market buys using quote currency (USDT) 
+        # require us to pass the USDT amount as the 'amount' parameter,
+        # but we must tell ccxt to use the 'cost' instead of 'base amount'
+        exchange.options['createMarketBuyOrderRequiresPrice'] = False
+        
+        # Execute Market Buy spending exactly 'quote_amount' of USDT
+        exchange.create_market_buy_order(symbol, quote_amount)
+        
+        # After buying, we need to fetch the actual price to save it to our database
+        ticker = exchange.fetch_ticker(symbol)
+        actual_price = ticker['last']
+        
+        # Calculate roughly how many base tokens we got for the database
+        base_amount = quote_amount / actual_price
+        
+        # Add to TinyDB
+        db.upsert({
+            'symbol': symbol,
+            'amount': base_amount,
+            'buy_price': actual_price,
+            'highest_price': actual_price,
+            'tp_pct': tp_pct,
+            'tsl_pct': tsl_pct
+        }, TradeQuery.symbol == symbol)
+        
+        bot.reply_to(message, f"✅ *SMART BUY SUCCESS!*\nSpent `${quote_amount}` on {symbol}\nTracking for {tp_pct}% Profit or {tsl_pct}% Trailing Stop.", parse_mode='Markdown')
+        except Exception as e:
+            bot.reply_to(message, f"❌ Trade Failed: {str(e)}")
+            
+    @bot.message_handler(commands=['price'])
+    def check_price(message):
+        if not is_authorized(message): return
+        try:
+            parts = message.text.split()
+            if len(parts) < 2:
+                bot.reply_to(message, "⚠️ Usage: `/price BTC/USDT`")
+                return
+            symbol = parts[1].upper()
+            price = exchange.fetch_ticker(symbol)['last']
+            bot.reply_to(message, f"📈 *{symbol}*: `${price}`", parse_mode='Markdown')
+        except Exception as e:
+            bot.reply_to(message, f"❌ Error fetching price. Make sure format is like `/price DOGE/USDT`")
+
+    @bot.message_handler(commands=['sell'])
+    def sell_token(message):
+        if not is_authorized(message): return
+        try:
+            parts = message.text.split()
+            if len(parts) < 3:
+                bot.reply_to(message, "⚠️ Usage: `/sell COIN/USDT <amount>`")
+                return
+            symbol, base_amount = parts[1].upper(), float(parts[2])
+            exchange.create_market_sell_order(symbol, base_amount)
+            db.remove(TradeQuery.symbol == symbol)
+            bot.reply_to(message, f"✅ *SELL SUCCESS!*\nSold `{base_amount}` of `{symbol}`", parse_mode='Markdown')
+        except Exception as e:
+            bot.reply_to(message, f"❌ Trade Failed: {str(e)}")
+
+# ==========================================
+# MAIN EXECUTION
+# ==========================================
 if __name__ == "__main__":
-    main()
+    print("Starting Webhook deployment...")
+    
+    if TELEGRAM_BOT_TOKEN:
+        # Start the background workers
+        threading.Thread(target=monitor_trades, daemon=True).start()
+        threading.Thread(target=monitor_new_coins, daemon=True).start()
+        
+        # 1. Clear any old polling conflicts by removing the webhook first
+        bot.remove_webhook()
+        time.sleep(1)
+        
+        # 2. Tell Telegram to PUSH messages to Render instead of us PULLING (Fixes 409 forever)
+        if RENDER_URL:
+            webhook_url = f"{RENDER_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
+            bot.set_webhook(url=webhook_url)
+            print(f"✅ Webhook successfully set to: {webhook_url}")
+        else:
+            print("⚠️ WARNING: RENDER_EXTERNAL_URL is not set. Webhooks might fail.")
+    else:
+        print("🛑 FATAL ERROR: TELEGRAM_BOT_TOKEN is missing!")
+
+    # Start the Flask Webhook Server
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
