@@ -188,16 +188,109 @@ if bot:
         msg += f"🔐 **MEXC_SECRET_KEY:** {'✅ Loaded' if sec_len > 0 else '❌ MISSING'}\n"
         bot.reply_to(message, msg, parse_mode='Markdown')
 
-    @bot.message_handler(commands=['balance'])
-    def check_balance(message):
+    @bot.message_handler(commands=['scanner'])
+    def toggle_scanner(message):
+        if not is_authorized(message): return
+        global scanner_active
+        scanner_active = not scanner_active
+        status = "ON 🟢" if scanner_active else "OFF 🔴"
+        bot.reply_to(message, f"New Coin Scanner is now {status}")
+
+    @bot.message_handler(commands=['autobuy'])
+    def toggle_autobuy(message):
+        if not is_authorized(message): return
+        global auto_buy_new_coins
+        auto_buy_new_coins = not auto_buy_new_coins
+        status = "ON 🟢" if auto_buy_new_coins else "OFF 🔴"
+        msg = f"Auto-Sniper for new coins is now {status}."
+        if auto_buy_new_coins:
+            msg += f"\n⚠️ *WARNING:* It will instantly buy ${AUTO_BUY_AMOUNT} of ANY new USDT pair listed on MEXC. This is risky due to volatility/rugs."
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['trades'])
+    def view_trades(message):
+        if not is_authorized(message): return
+        active_trades = db.all()
+        if not active_trades:
+            bot.reply_to(message, "No active smart trades being monitored in the database.")
+            return
+            
+        msg = "📊 *Active Monitored Trades:*\n\n"
+        for trade in active_trades:
+            msg += (
+                f"🔹 *{trade['symbol']}*\n"
+                f"  • Bought At: `${trade['buy_price']:.6f}`\n"
+                f"  • Highest Reached: `${trade['highest_price']:.6f}`\n"
+                f"  • Target TP: +{trade['tp_pct']}%\n"
+                f"  • Trailing Stop: -{trade['tsl_pct']}%\n"
+            )
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['smartbuy'])
+    def smart_buy_token(message):
         if not is_authorized(message): return
         try:
-            balance = exchange.fetch_balance()
-            active_balances = {k: v for k, v in balance['total'].items() if v > 0}
-            msg = "💰 *Your MEXC Balances:*\n" + "\n".join([f"• {k}: `{v}`" for k, v in active_balances.items()])
-            bot.reply_to(message, msg if active_balances else "Wallet empty.", parse_mode='Markdown')
+            parts = message.text.split()
+            if len(parts) != 5:
+                bot.reply_to(message, "⚠️ Usage: `/smartbuy COIN/USDT <$USDT> <TP%> <TSL%>`\nExample: `/smartbuy BTC/USDT 50 10 5`", parse_mode='Markdown')
+                return
+
+            symbol = parts[1].upper()
+            quote_amount = float(parts[2])
+            tp_pct = float(parts[3])
+            tsl_pct = float(parts[4])
+            
+            bot.reply_to(message, f"⏳ Buying ${quote_amount} of {symbol}...")
+            
+            ticker = exchange.fetch_ticker(symbol)
+            price = ticker['last']
+            base_amount = quote_amount / price
+            
+            # Execute Market Buy
+            exchange.create_market_buy_order(symbol, base_amount)
+            
+            # Add to TinyDB
+            db.upsert({
+                'symbol': symbol,
+                'amount': base_amount,
+                'buy_price': price,
+                'highest_price': price,
+                'tp_pct': tp_pct,
+                'tsl_pct': tsl_pct
+            }, TradeQuery.symbol == symbol)
+            
+            bot.reply_to(message, f"✅ *SMART BUY SUCCESS!*\nBought `{base_amount:.5f}` {symbol}\nTracking for {tp_pct}% Profit or {tsl_pct}% Trailing Stop.", parse_mode='Markdown')
         except Exception as e:
-            bot.reply_to(message, f"❌ Error: {str(e)}")
+            bot.reply_to(message, f"❌ Trade Failed: {str(e)}")
+            
+    @bot.message_handler(commands=['price'])
+    def check_price(message):
+        if not is_authorized(message): return
+        try:
+            parts = message.text.split()
+            if len(parts) < 2:
+                bot.reply_to(message, "⚠️ Usage: `/price BTC/USDT`")
+                return
+            symbol = parts[1].upper()
+            price = exchange.fetch_ticker(symbol)['last']
+            bot.reply_to(message, f"📈 *{symbol}*: `${price}`", parse_mode='Markdown')
+        except Exception as e:
+            bot.reply_to(message, f"❌ Error fetching price. Make sure format is like `/price DOGE/USDT`")
+
+    @bot.message_handler(commands=['sell'])
+    def sell_token(message):
+        if not is_authorized(message): return
+        try:
+            parts = message.text.split()
+            if len(parts) < 3:
+                bot.reply_to(message, "⚠️ Usage: `/sell COIN/USDT <amount>`")
+                return
+            symbol, base_amount = parts[1].upper(), float(parts[2])
+            exchange.create_market_sell_order(symbol, base_amount)
+            db.remove(TradeQuery.symbol == symbol)
+            bot.reply_to(message, f"✅ *SELL SUCCESS!*\nSold `{base_amount}` of `{symbol}`", parse_mode='Markdown')
+        except Exception as e:
+            bot.reply_to(message, f"❌ Trade Failed: {str(e)}")
 
 # ==========================================
 # MAIN EXECUTION
