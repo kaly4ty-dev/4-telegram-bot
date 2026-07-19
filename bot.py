@@ -5,7 +5,7 @@ import ccxt
 import threading
 from dotenv import load_dotenv
 from tinydb import TinyDB, Query
-from flask import Flask
+from flask import Flask, request, abort
 
 # Load environment variables
 load_dotenv()
@@ -17,23 +17,17 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 MEXC_API_KEY = os.getenv("MEXC_API_KEY", "").strip()
 MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY", "").strip()
 
-# Safely parse ALLOWED_USER_ID
+# Render automatically provides this variable with your app URL (e.g. https://four-telegram-bot.onrender.com)
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+
 allowed_user_str = os.getenv("ALLOWED_USER_ID", "").strip()
 try:
     ALLOWED_USER_ID = int(allowed_user_str) if allowed_user_str else 0
 except ValueError:
     ALLOWED_USER_ID = 0
 
-# Verify Telegram Token exists BEFORE initializing the bot
-if not TELEGRAM_BOT_TOKEN:
-    print("CRITICAL ERROR: TELEGRAM_BOT_TOKEN is not set!")
-    print("Please go to Render.com -> Your Web Service -> Environment")
-    print("And add the variable: TELEGRAM_BOT_TOKEN = <your_token_here>")
-    
-# Initialize Bot (Only if token exists, otherwise it will crash here)
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
-# Initialize MEXC
 exchange = ccxt.mexc({
     'apiKey': MEXC_API_KEY,
     'secret': MEXC_SECRET_KEY,
@@ -56,21 +50,26 @@ def is_authorized(message):
     return message.from_user.id == ALLOWED_USER_ID
 
 # ==========================================
-# FLASK WEB SERVER (KEEP-ALIVE FOR RENDER)
+# FLASK WEBHOOK SERVER (THE 409 FIX)
 # ==========================================
 app = Flask(__name__)
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def home():
     if not TELEGRAM_BOT_TOKEN:
-        return "ERROR: Bot Token is missing in Render Environment Variables! Please add TELEGRAM_BOT_TOKEN."
-    return "Bot is running and alive!"
+        return "ERROR: Bot Token is missing!"
+    return "✅ Bot Webhook Server is running and alive!"
 
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    print(f"Starting Flask server on port {port}...")
-    app.run(host='0.0.0.0', port=port, use_reloader=False)
-
+# This route receives instant pushes from Telegram
+@app.route('/' + TELEGRAM_BOT_TOKEN, methods=['POST'])
+def receive_update():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "OK", 200
+    else:
+        abort(403)
 
 # ==========================================
 # BACKGROUND WORKERS
@@ -119,9 +118,8 @@ def monitor_new_coins():
     try:
         markets = exchange.fetch_markets()
         known_markets = {m['symbol'] for m in markets if m['quote'] == 'USDT'}
-        print(f"Loaded {len(known_markets)} existing markets.")
     except Exception as e:
-        print(f"Failed to load markets: {e}")
+        pass
 
     while True:
         if scanner_active:
@@ -154,16 +152,14 @@ def monitor_new_coins():
                                 if bot: bot.send_message(ALLOWED_USER_ID, f"✅ Auto-buy success. Added to smart tracker (20% TP, 10% TSL).")
                             except Exception as e:
                                 if bot: bot.send_message(ALLOWED_USER_ID, f"❌ Auto-buy failed: {e}")
-
                     known_markets = current_markets
             except Exception as e:
-                print(f"Error in scanner: {e}")
+                pass
         time.sleep(30)
 
 # ==========================================
 # TELEGRAM COMMANDS
 # ==========================================
-
 if bot:
     @bot.message_handler(commands=['start', 'help'])
     def send_welcome(message):
@@ -177,9 +173,20 @@ if bot:
             "👉 `/sell <symbol> <amount>` - Manual Sell\n\n"
             "🔍 *Scanner & Auto-Sniper*\n"
             "👉 `/scanner` - Toggle new coin detection\n"
-            "👉 `/autobuy` - Toggle instant buying of new coins"
+            "👉 `/autobuy` - Toggle instant buying of new coins\n"
+            "👉 `/status` - Check API Key Status"
         )
         bot.reply_to(message, help_text, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['status'])
+    def check_status(message):
+        if not is_authorized(message): return
+        api_len = len(MEXC_API_KEY)
+        sec_len = len(MEXC_SECRET_KEY)
+        msg = "🤖 *Bot Diagnostics & Status:*\n\n"
+        msg += f"🔑 **MEXC_API_KEY:** {'✅ Loaded' if api_len > 0 else '❌ MISSING'}\n"
+        msg += f"🔐 **MEXC_SECRET_KEY:** {'✅ Loaded' if sec_len > 0 else '❌ MISSING'}\n"
+        bot.reply_to(message, msg, parse_mode='Markdown')
 
     @bot.message_handler(commands=['balance'])
     def check_balance(message):
@@ -192,50 +199,31 @@ if bot:
         except Exception as e:
             bot.reply_to(message, f"❌ Error: {str(e)}")
 
-    @bot.message_handler(commands=['status'])
-    def check_status(message):
-        if not is_authorized(message): return
-        
-        api_len = len(MEXC_API_KEY)
-        sec_len = len(MEXC_SECRET_KEY)
-        
-        msg = "🤖 *Bot Diagnostics & Status:*\n\n"
-        msg += f"🔑 **MEXC_API_KEY:** {'✅ Loaded' if api_len > 0 else '❌ MISSING'} (Length: {api_len})\n"
-        msg += f"🔐 **MEXC_SECRET_KEY:** {'✅ Loaded' if sec_len > 0 else '❌ MISSING'} (Length: {sec_len})\n"
-        
-        if sec_len == 0:
-            msg += "\n⚠️ *Fix:* Go to Render.com -> Environment. Add exactly `MEXC_SECRET_KEY`."
-            
-        bot.reply_to(message, msg, parse_mode='Markdown')
-
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    print("Starting deployment...")
+    print("Starting Webhook deployment...")
     
-    if not TELEGRAM_BOT_TOKEN:
-        print("--------------------------------------------------")
-        print("🛑 FATAL ERROR: TELEGRAM_BOT_TOKEN is missing!")
-        print("The script is running, but the Telegram Bot will not start.")
-        print("Please add your Token in Render.com -> Environment Variables")
-        print("--------------------------------------------------")
+    if TELEGRAM_BOT_TOKEN:
+        # Start the background workers
+        threading.Thread(target=monitor_trades, daemon=True).start()
+        threading.Thread(target=monitor_new_coins, daemon=True).start()
+        
+        # 1. Clear any old polling conflicts by removing the webhook first
+        bot.remove_webhook()
+        time.sleep(1)
+        
+        # 2. Tell Telegram to PUSH messages to Render instead of us PULLING (Fixes 409 forever)
+        if RENDER_URL:
+            webhook_url = f"{RENDER_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
+            bot.set_webhook(url=webhook_url)
+            print(f"✅ Webhook successfully set to: {webhook_url}")
+        else:
+            print("⚠️ WARNING: RENDER_EXTERNAL_URL is not set. Webhooks might fail.")
     else:
-        # Start the Telegram Bot in a background thread
-        print("Starting Telegram Bot listener...")
-        def run_bot():
-            try:
-                bot.infinity_polling(timeout=10, long_polling_timeout=5)
-            except Exception as e:
-                print(f"Telegram polling crashed: {e}")
-                
-        threading.Thread(target=run_bot, daemon=True).start()
-    
-    # Start the trading/monitoring workers
-    print("Starting Trade Monitors...")
-    threading.Thread(target=monitor_trades, daemon=True).start()
-    threading.Thread(target=monitor_new_coins, daemon=True).start()
-    
-    # Start the Flask server ON THE MAIN THREAD
-    print("Starting Flask Web Server...")
-    run_flask()
+        print("🛑 FATAL ERROR: TELEGRAM_BOT_TOKEN is missing!")
+
+    # Start the Flask Webhook Server
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
