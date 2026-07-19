@@ -1,8 +1,8 @@
 import os
 import time
-import requests
-import base58
-from dotenv import load_dotenv
+import telebot
+import ccxt
+import threading
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solana.rpc.api import Client
